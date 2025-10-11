@@ -26,3 +26,7 @@ python compare.py
 ## 4. compare.py
 - Compare the CNN model in revised.py to LSTM and RCNN
 - Added plots to compare accuracy and loss of the models
+
+# Credit
+Original code and data:
+https://github.com/yaseen21khan/Classification-of-Heart-Sound-Signal-Using-Multiple-Features-
