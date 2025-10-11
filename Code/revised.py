@@ -289,7 +289,7 @@ def parse_arguments():
                        help='Path to the dataset')
     parser.add_argument('--model_save_path', type=str, default='models/heart_model.h5',
                        help='Path to save the trained model')
-    parser.add_argument('--labels', type=list, default=["MR", "MS", "N", "MVP"],
+    parser.add_argument('--labels', type=list, default=["MR", "MS", "N", "MVP", "AS"],
                        help='Labels for classification')
     parser.add_argument('--n_mfcc', type=int, default=16, 
                         help='Number of MFCC features to extract')

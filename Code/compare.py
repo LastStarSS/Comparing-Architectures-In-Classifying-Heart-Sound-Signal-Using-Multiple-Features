@@ -1,188 +1,234 @@
 import os
 import numpy as np
 import librosa
-import matplotlib.pyplot as plt
 import pywt
 import random
+import argparse
+import matplotlib.pyplot as plt
+from matplotlib.widgets import CheckButtons
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelBinarizer
 from tensorflow.keras import layers, models
-from matplotlib.widgets import CheckButtons
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, Flatten, BatchNormalization
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
 
-# 1. Settings
-DATASET_PATH = "D:/Coding/NCKH/Classification-Of-Heart-Sound-Signal-Using-Multiple-Features/Data"
-LABELS = ["MR", "MS", "N", "MVP"]
-N_MFCC = 16
-N_FRAMES = 30
-IMG_CHANNELS = 2
-EPOCHS = 30
-BATCH_SIZE = 32
+class HeartSoundCompare:
+    def __init__(self, args):
+        self.data_path = args.data_path
+        self.labels = args.labels
+        self.n_mfcc = args.n_mfcc
+        self.n_frames = args.n_frames
+        self.img_channels = args.img_channels
+        self.batch_size = args.batch_size
+        self.epochs = args.epochs
+        self.learning_rate = args.learning_rate
+        self.dropout_rate = args.dropout_rate
+        self.test_size = args.test_size
+        self.model_save_dir = args.model_save_dir
+        os.makedirs(self.model_save_dir, exist_ok=True)
 
-# 2. Load dataset and extract MFCC + DWT features
-features = []
-labels = []
+    def load_data(self):
+        features, file_labels = [], []
+        for label in self.labels:
+            folder = os.path.join(self.data_path, label)
+            for file in os.listdir(folder):
+                if file.endswith(".wav"):
+                    try:
+                        filepath = os.path.join(folder, file)
+                        y, sr = librosa.load(filepath, sr=None)
 
-for label in LABELS:
-    folder = os.path.join(DATASET_PATH, label)
-    for file in os.listdir(folder):
-        if file.endswith(".wav"):
-            filepath = os.path.join(folder, file)
-            y, sr = librosa.load(filepath, sr=None)
+                        # MFCC
+                        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=self.n_mfcc)
+                        if mfcc.shape[1] < self.n_frames:
+                            continue
+                        mfcc_feat = mfcc[:, :self.n_frames]
 
-            # MFCC
-            mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=N_MFCC)
-            if mfcc.shape[1] < N_FRAMES:
-                continue
-            mfcc_feat = mfcc[:, :N_FRAMES]
+                        # DWT
+                        coeffs = pywt.wavedec(y, 'db4', level=4)
+                        dwt_feat = coeffs[0]
+                        if len(dwt_feat) < self.n_frames:
+                            dwt_feat = np.pad(dwt_feat, (0, self.n_frames - len(dwt_feat)))
+                        else:
+                            dwt_feat = dwt_feat[:self.n_frames]
+                        dwt_feat = dwt_feat.reshape(1, self.n_frames)
+                        dwt_feat_rep = np.repeat(dwt_feat, self.n_mfcc, axis=0)
 
-            # DWT
-            coeffs = pywt.wavedec(y, 'db4', level=4)
-            dwt_feat = coeffs[0]  # approximation
-            if len(dwt_feat) < N_FRAMES:
-                dwt_feat = np.pad(dwt_feat, (0, N_FRAMES - len(dwt_feat)))
-            else:
-                dwt_feat = dwt_feat[:N_FRAMES]
-            dwt_feat = dwt_feat.reshape(1, N_FRAMES)
+                        # Stack as channels
+                        combined_feat = np.stack([mfcc_feat, dwt_feat_rep], axis=-1)
+                        features.append(combined_feat)
+                        file_labels.append(label)
+                    except:
+                        continue
+        X = np.array(features)
+        y = np.array(file_labels)
+        encoder = LabelBinarizer()
+        y_onehot = encoder.fit_transform(y)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y_onehot, test_size=self.test_size, random_state=42, stratify=y
+        )
+        # LSTM reshaped data
+        X_train_lstm = X_train.reshape((X_train.shape[0], self.n_frames, self.n_mfcc*self.img_channels))
+        X_test_lstm  = X_test.reshape((X_test.shape[0], self.n_frames, self.n_mfcc*self.img_channels))
+        return X_train, X_test, y_train, y_test, X_train_lstm, X_test_lstm, encoder
 
-            # Repeat DWT to match MFCC shape
-            dwt_feat_rep = np.repeat(dwt_feat, N_MFCC, axis=0)
+    def build_cnn(self, input_shape):
+        model = Sequential([
+            layers.Conv2D(32, (3,3), activation='relu', input_shape=input_shape),
+            BatchNormalization(),
+            layers.MaxPooling2D((2,2)),
+            Dropout(self.dropout_rate),
+            layers.Conv2D(64, (3,3), activation='relu'),
+            BatchNormalization(),
+            layers.MaxPooling2D((2,2)),
+            Dropout(self.dropout_rate),
+            Flatten(),
+            Dense(64, activation='relu'),
+            BatchNormalization(),
+            Dropout(self.dropout_rate/2),
+            Dense(len(self.labels), activation='softmax')
+        ])
+        model.compile(optimizer=Adam(self.learning_rate),
+                      loss='categorical_crossentropy',
+                      metrics=['accuracy'])
+        return model
 
-            # Stack MFCC + DWT as channels
-            combined_feat = np.stack([mfcc_feat, dwt_feat_rep], axis=-1)  # (n_mfcc, n_frames, 2)
-            features.append(combined_feat)
-            labels.append(label)
+    def build_lstm(self, input_shape):
+        model = models.Sequential([
+            layers.LSTM(128, input_shape=input_shape, return_sequences=True, name='LSTM_1'),
+            layers.Dropout(0.2, name ='Dropout_1'),
+            layers.LSTM(64, input_shape=input_shape, name='LSTM_2'),
+            layers.Dropout(0.2, name ='Dropout_2'),
+            Dense(64, activation='relu', name = 'Dense_1'),
+            Dense(len(self.labels), activation='softmax', name = 'Output')
+        ])
+        model.compile(optimizer=Adam(self.learning_rate),
+                      loss='categorical_crossentropy',
+                      metrics=['accuracy'])
+        return model
 
-X = np.array(features)
-y = np.array(labels)
+    def build_rcnn(self, input_shape):
+        model = models.Sequential([
+            # Convolutional layers
+            layers.Conv2D(32, (3,3), activation='relu', input_shape=input_shape),
+            BatchNormalization(),
+            layers.MaxPooling2D((2,2)),
+            Dropout(self.dropout_rate),
 
-# One-hot encode labels
-encoder = LabelBinarizer()
-y_onehot = encoder.fit_transform(y)
+            layers.Conv2D(64, (3,3), activation='relu'),
+            BatchNormalization(),
+            layers.MaxPooling2D((2,2)),
+            Dropout(self.dropout_rate),
 
-# Train/test split
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y_onehot, test_size=0.3, random_state=42, stratify=y
-)
+            layers.Reshape((-1, 64)), 
+            layers.SimpleRNN(64),
 
-# 3. Model builders
-def build_cnn(input_shape=(N_MFCC, N_FRAMES, IMG_CHANNELS), n_classes=len(LABELS)):
-    model = models.Sequential([
-        layers.Conv2D(32, (3,3), activation='relu', input_shape=input_shape),
-        layers.MaxPooling2D((2,2)),
-        layers.Conv2D(64, (3,3), activation='relu'),
-        layers.MaxPooling2D((2,2)),
-        layers.Flatten(),
-        layers.Dense(128, activation='relu'),
-        layers.Dense(n_classes, activation='softmax')
-    ])
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-    return model
+            Dense(64, activation='relu'),
+            BatchNormalization(),
+            Dropout(self.dropout_rate/2),
+            Dense(len(self.labels), activation='softmax')
+        ])
+        model.compile(optimizer=Adam(self.learning_rate),
+                      loss='categorical_crossentropy',
+                      metrics=['accuracy'])
+        return model
 
-def build_lstm(input_shape=(N_FRAMES, N_MFCC * IMG_CHANNELS), n_classes=len(LABELS)):
-    model = models.Sequential([
-        layers.LSTM(128, input_shape=input_shape, return_sequences=False),
-        layers.Dense(64, activation='relu'),
-        layers.Dense(n_classes, activation='softmax')
-    ])
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-    return model
+    def train_and_save(self, model, X_train, y_train, X_test, y_test, name):
+        model_path = os.path.join(self.model_save_dir, f"{name}.h5")
+        early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+        history = model.fit(X_train, y_train, 
+                            validation_data=(X_test, y_test),
+                            epochs=self.epochs,
+                            batch_size=self.batch_size,
+                            callbacks=[early_stop],
+                            verbose=1)
+        model.save(model_path)
+        return history, model
 
-def build_rcnn(input_shape=(N_MFCC, N_FRAMES, IMG_CHANNELS), n_classes=len(LABELS)):
-    model = models.Sequential([
-        layers.Conv2D(32, (3,3), activation='relu', input_shape=input_shape),
-        layers.MaxPooling2D((2,2)),
-        layers.Conv2D(64, (3,3), activation='relu'),
-        layers.MaxPooling2D((2,2)),
-        layers.Reshape((-1, 64)),  # flatten spatial features into sequence
-        layers.LSTM(64),
-        layers.Dense(64, activation='relu'),
-        layers.Dense(n_classes, activation='softmax')
-    ])
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-    return model
+    def plot_histories(self, histories):
+        fig = plt.figure(figsize=(14,6))
 
-# Prepare reshaped inputs
-X_train_lstm = X_train.reshape((X_train.shape[0], N_FRAMES, N_MFCC * IMG_CHANNELS))
-X_test_lstm  = X_test.reshape((X_test.shape[0], N_FRAMES, N_MFCC * IMG_CHANNELS))
+        colors = {"CNN":"tab:blue","LSTM":"tab:green","RCNN":"tab:red"}
+        lines = {}
 
-# 4. Train models
-histories = {}
+        # Accuracy subplot
+        ax1 = plt.subplot(1,2,1)
+        for name,hist in histories.items():
+            l1, = ax1.plot(hist.history['accuracy'], color=colors[name], linestyle='-', label=f'{name} Train')
+            l2, = ax1.plot(hist.history['val_accuracy'], color=colors[name], linestyle='--', label=f'{name} Val')
+            lines[f'{name} Train'] = l1
+            lines[f'{name} Val'] = l2
+        ax1.set_title("Accuracy Comparison")
+        ax1.set_xlabel("Epochs")
+        ax1.set_ylabel("Accuracy")
+        ax1.set_ylim(0,1)
+        ax1.legend()
 
-print("Training CNN...")
-cnn_model = build_cnn()
-histories["CNN"] = cnn_model.fit(
-    X_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE,
-    validation_data=(X_test, y_test), verbose=1
-)
+        # Loss subplot
+        ax2 = plt.subplot(1,2,2)
+        for name,hist in histories.items():
+            l3, = ax2.plot(hist.history['loss'], color=colors[name], linestyle='-', label=f'{name} Train')
+            l4, = ax2.plot(hist.history['val_loss'], color=colors[name], linestyle='--', label=f'{name} Val')
+            lines[f'{name} Train (Loss)'] = l3
+            lines[f'{name} Val (Loss)'] = l4
+        ax2.set_title("Loss Comparison")
+        ax2.set_xlabel("Epochs")
+        ax2.set_ylabel("Loss")
+        ax2.set_ylim(0,1)
+        ax2.legend()
+        plt.savefig(os.path.join(self.model_save_dir,'comparison.png'))
 
-print("Training LSTM...")
-lstm_model = build_lstm()
-histories["LSTM"] = lstm_model.fit(
-    X_train_lstm, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE,
-    validation_data=(X_test_lstm, y_test), verbose=1
-)
+        plt.tight_layout()
 
-print("Training RCNN...")
-rcnn_model = build_rcnn()
-histories["RCNN"] = rcnn_model.fit(
-    X_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE,
-    validation_data=(X_test, y_test), verbose=1
-)
+        # Checkbox widget
+        rax = plt.axes([0.3, 0.1, 0.15, 0.4])  # position [left, bottom, width, height]
+        check = CheckButtons(rax, list(lines.keys()), [line.get_visible() for line in lines.values()])
 
-# 5. Plot comparisons
-def plot_histories(histories):
-    plt.figure(figsize=(14,6))
+        def toggle(label):
+            lines[label].set_visible(not lines[label].get_visible())
+            plt.draw()
 
-    # Assign a color per model
-    colors = {
-        "CNN": "tab:blue",
-        "LSTM": "tab:green",
-        "RCNN": "tab:red"
-    }
+        check.on_clicked(toggle)
+        plt.show()
 
-    # Store plotted line objects
-    lines = {}
+    def main(self):
+        X_train, X_test, y_train, y_test, X_train_lstm, X_test_lstm, encoder = self.load_data()
+        histories = {}
 
-    # Accuracy subplot
-    ax1 = plt.subplot(1,2,1)
-    for name, hist in histories.items():
-        l1, = ax1.plot(hist.history['accuracy'], color=colors[name], linestyle='-', label=f'{name} Train')
-        l2, = ax1.plot(hist.history['val_accuracy'], color=colors[name], linestyle='--', label=f'{name} Val')
-        lines[f"{name} Train"] = l1
-        lines[f"{name} Val"] = l2
-    ax1.set_title("Accuracy Comparison")
-    ax1.set_xlabel("Epochs")
-    ax1.set_ylabel("Accuracy")
-    ax1.set_ylim(0,1)
-    ax1.legend()
+        # CNN
+        cnn_model = self.build_cnn((self.n_mfcc, self.n_frames, self.img_channels))
+        histories['CNN'], _ = self.train_and_save(cnn_model, X_train, y_train, X_test, y_test, 'CNN')
 
-    # Loss subplot
-    ax2 = plt.subplot(1,2,2)
-    for name, hist in histories.items():
-        l3, = ax2.plot(hist.history['loss'], color=colors[name], linestyle='-', label=f'{name} Train')
-        l4, = ax2.plot(hist.history['val_loss'], color=colors[name], linestyle='--', label=f'{name} Val')
-        lines[f"{name} Train (Loss)"] = l3
-        lines[f"{name} Val (Loss)"] = l4
-    ax2.set_title("Loss Comparison")
-    ax2.set_xlabel("Epochs")
-    ax2.set_ylabel("Loss")
-    ax2.legend()
+        # LSTM
+        lstm_model = self.build_lstm((self.n_frames, self.n_mfcc*self.img_channels))
+        histories['LSTM'], _ = self.train_and_save(lstm_model, X_train_lstm, y_train, X_test_lstm, y_test, 'LSTM')
 
-    plt.tight_layout()
+        # RCNN
+        rcnn_model = self.build_rcnn((self.n_mfcc, self.n_frames, self.img_channels))
+        histories['RCNN'], _ = self.train_and_save(rcnn_model, X_train, y_train, X_test, y_test, 'RCNN')
 
-    # Create checkboxes for toggling
-    rax = plt.axes([0.01, 0.4, 0.15, 0.4])  # position of checkbox panel
-    labels = list(lines.keys())
-    visibility = [line.get_visible() for line in lines.values()]
-    check = CheckButtons(rax, labels, visibility)
+        self.plot_histories(histories)
+        return histories
 
-    def toggle(label):
-        line = lines[label]
-        line.set_visible(not line.get_visible())
-        plt.draw()
-
-    check.on_clicked(toggle)
-    plt.show()
+def parse_args():
+    parser = argparse.ArgumentParser(description="Compare Heart Sound Models")
+    parser.add_argument('--data_path', type=str, default="D:/Coding/NCKH/Classification-Of-Heart-Sound-Signal-Using-Multiple-Features/Data")
+    parser.add_argument('--labels', type=list, default=["MR","MS","N","MVP","AS"])
+    parser.add_argument('--n_mfcc', type=int, default=16)
+    parser.add_argument('--n_frames', type=int, default=30)
+    parser.add_argument('--img_channels', type=int, default=2)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--epochs', type=int, default=30)
+    parser.add_argument('--learning_rate', type=float, default=0.000625)
+    parser.add_argument('--dropout_rate', type=float, default=0.3)
+    parser.add_argument('--test_size', type=float, default=0.3)
+    parser.add_argument('--model_save_dir', type=str, default='models/compare')
+    return parser.parse_args()
 
 
-plot_histories(histories)
+
+if __name__ == "__main__":
+    args = parse_args()
+    comparator = HeartSoundCompare(args)
+    comparator.main()
