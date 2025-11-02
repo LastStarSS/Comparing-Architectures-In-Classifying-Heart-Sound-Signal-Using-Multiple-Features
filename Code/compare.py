@@ -83,6 +83,7 @@ class HeartSoundCompare:
             BatchNormalization(),
             layers.MaxPooling2D((2,2)),
             Dropout(self.dropout_rate),
+            
             Flatten(),
             Dense(64, activation='relu'),
             BatchNormalization(),
@@ -192,6 +193,60 @@ class HeartSoundCompare:
         check.on_clicked(toggle)
         plt.show()
 
+    def visualize_samples(self, model, X_test_lstm, y_test, encoder, n=10):
+        # Load the model if not already
+        if isinstance(model, str):
+            model = models.load_model(model)
+
+        # Collect all test files with labels
+        test_files = []
+        for label in self.labels:
+            folder = os.path.join(self.data_path, label)
+            for file in os.listdir(folder):
+                if file.endswith(".wav"):
+                    test_files.append((os.path.join(folder, file), label))
+
+        # Randomly select n files
+        random_files = random.sample(test_files, n)
+
+        plt.figure(figsize=(15, 10))
+        for idx, (filepath, true_label) in enumerate(random_files, 1):
+            y_audio, sr = librosa.load(filepath, sr=None)
+
+            # MFCC + DWT features
+            mfcc = librosa.feature.mfcc(y=y_audio, sr=sr, n_mfcc=self.n_mfcc)
+            if mfcc.shape[1] < self.n_frames:
+                continue
+            mfcc_feat = mfcc[:, :self.n_frames]
+
+            coeffs = pywt.wavedec(y_audio, 'db4', level=4)
+            dwt_feat = coeffs[0]
+            if len(dwt_feat) < self.n_frames:
+                dwt_feat = np.pad(dwt_feat, (0, self.n_frames - len(dwt_feat)))
+            else:
+                dwt_feat = dwt_feat[:self.n_frames]
+            dwt_feat = dwt_feat.reshape(1, self.n_frames)
+            dwt_feat_rep = np.repeat(dwt_feat, self.n_mfcc, axis=0)
+
+            combined_feat = np.stack([mfcc_feat, dwt_feat_rep], axis=-1)  # (16,30,2)
+            combined_feat = combined_feat[np.newaxis, ...]
+            lstm_input = combined_feat.reshape(1, self.n_frames, self.n_mfcc*self.img_channels)  # (1,30,32)
+            pred_prob = model.predict(combined_feat)
+            pred_label = encoder.classes_[np.argmax(pred_prob)]
+
+            pred_label = encoder.classes_[np.argmax(pred_prob)]
+
+            # CWT visualization
+            coeffs_cwt, freqs = pywt.cwt(y_audio, scales=np.arange(1,128), wavelet='morl')
+            plt.subplot(2, 5, idx)
+            plt.imshow(np.abs(coeffs_cwt), aspect='auto', cmap='magma', origin='lower')
+            plt.title(f"T: {true_label}\nP: {pred_label}", fontsize=10)
+            plt.xlabel("Time")
+            plt.ylabel("Scale")
+            plt.tight_layout()
+
+        plt.show()
+
     def main(self):
         X_train, X_test, y_train, y_test, X_train_lstm, X_test_lstm, encoder = self.load_data()
         histories = {}
@@ -232,3 +287,5 @@ if __name__ == "__main__":
     args = parse_args()
     comparator = HeartSoundCompare(args)
     comparator.main()
+    X_train, X_test, y_train, y_test, X_train_lstm, X_test_lstm, encoder = comparator.load_data()
+    comparator.visualize_samples(os.path.join(args.model_save_dir, 'CNN.h5'), X_test_lstm, y_test, encoder, n=10)
